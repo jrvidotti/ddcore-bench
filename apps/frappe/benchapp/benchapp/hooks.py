@@ -1,0 +1,6 @@
+app_name = "benchapp"
+app_title = "Bench App"
+app_publisher = "ddcore-bench"
+app_description = "Benchmark fixture mirroring the ddcore benchapp"
+app_email = "bench@example.com"
+app_license = "MIT"

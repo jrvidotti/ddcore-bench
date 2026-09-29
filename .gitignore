@@ -1,0 +1,6 @@
+.env.bench
+node_modules/
+results/*
+!results/.gitkeep
+logs/
+__pycache__/

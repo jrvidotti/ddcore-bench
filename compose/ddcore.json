@@ -1,0 +1,8 @@
+{
+  "apps": ["apps/benchapp"],
+  "workers": 4,
+  "scheduler": true,
+  "lang": "en",
+  "currency": "USD",
+  "timezone": "UTC"
+}

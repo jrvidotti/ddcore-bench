@@ -1,0 +1,118 @@
+# Frappe: gunicorn + a queue worker + scheduler + socketio + two Redis + MariaDB,
+# adapted from frappe_docker's pwd.yml. nginx is left out: the load generator
+# talks to gunicorn directly, as it talks to the ddcore process directly.
+name: bench-frappe
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: compose/frappe.Dockerfile
+    args:
+      FRAPPE_IMAGE: ${FRAPPE_IMAGE:-frappe/erpnext:v16.36.1}
+  image: ddcore-bench/frappe:latest
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+  environment: &env
+    DB_HOST: db
+    DB_PORT: "3306"
+    REDIS_CACHE: redis-cache:6379
+    REDIS_QUEUE: redis-queue:6379
+    SOCKETIO_PORT: "9000"
+    FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+    FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+
+services:
+  db:
+    image: mariadb:11.8
+    cpus: ${DB_CPUS:-2}
+    mem_limit: ${DB_MEM:-2g}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=200
+      # MariaDB 11.8's default. ON makes concurrent inserts on one naming series
+      # fail with error 1020, which Frappe returns as a 500 QueryDeadlockError to
+      # be retried. OFF (the pre-11.6 behaviour) is a variant worth measuring;
+      # changing it needs `docker compose up -d db`, not `start`.
+      - --innodb-snapshot-isolation=${MARIADB_SNAPSHOT_ISOLATION:-ON}
+    environment:
+      MARIADB_ROOT_PASSWORD: admin
+    volumes: [db-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 30
+
+  redis-cache:
+    image: redis:6.2-alpine
+  redis-queue:
+    image: redis:6.2-alpine
+
+  configurator:
+    <<: *app
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    # The last step creates the site's encryption_key: new-site writes none, and
+    # Frappe creates one on first use. If a gunicorn worker holding a cached config
+    # gets there first, it writes a second key and every API secret stops
+    # decrypting — so it is created here, before any worker starts.
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+        wait-for-it -t 120 db:3306;
+        if [ ! -d sites/localhost ]; then
+          bench new-site localhost --mariadb-user-host-login-scope='%' --admin-password=admin --db-root-username=root --db-root-password=admin --install-app benchapp --set-default;
+        fi;
+        bench --site localhost execute frappe.utils.password.get_encryption_key > /dev/null
+    depends_on:
+      db: { condition: service_healthy }
+
+  app:
+    <<: *app
+    cpus: ${APP_CPUS:-2}
+    mem_limit: ${APP_MEM:-2g}
+    environment:
+      <<: *env
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-5}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+    ports: ["8102:8000"]
+    depends_on:
+      configurator: { condition: service_completed_successfully }
+
+  queue:
+    <<: *app
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    depends_on:
+      configurator: { condition: service_completed_successfully }
+
+  scheduler:
+    <<: *app
+    command: ["bench", "schedule"]
+    depends_on:
+      configurator: { condition: service_completed_successfully }
+
+  websocket:
+    <<: *app
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    depends_on:
+      configurator: { condition: service_completed_successfully }
+
+volumes:
+  db-data:
+  sites:
+  logs:
+
+# A fixed subnet: Docker's default pools run out on busy machines.
+networks:
+  default:
+    ipam:
+      config: [{ subnet: 10.201.2.0/24 }]

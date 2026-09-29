@@ -1,0 +1,8 @@
+{
+  "name": "ddcore-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "seed": "node seed/seed.js"
+  }
+}
